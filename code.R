@@ -36,20 +36,11 @@ new <- read.nexus("WP_tumours_StrctC_GMRF_Test8.tre")
 write.tree(new, file = "DFTD.newick")
 
 DFTD <- read.tree("DFTD.newick")
-  #------------------------------------------------------------------------
-##################look for non-random tree structure using treestructure (Volz et al)##################
-#------------------------------------------------------------------------
 
-#try min 10 for clade size 
-treeSt <-  trestruct(DFTD, minCladeSize = 10, minOverlap = -Inf, nsim = 10000,
-                     level = 0.05, ncpu = 1, verbosity = 1)
-treeSt_df <- as.data.frame(treeSt)
+########################################################
+#-----------Epidemilogical covariates------------------
+########################################################
 
-plot(treeSt, use_ggtree = TRUE)
-
-#------------------------------------------------------------------------
-##################Look at NE through time for various linneages (Karcher et al)##################
-#------------------------------------------------------------------------  
 #add covariates
 cov <- read.csv("DFTF_cov.csv", h=T)
 #fix dates
@@ -69,29 +60,98 @@ covS <- cov2017%>% group_by(time) %>% summarise_all( list(mean))
 
 str(cov)
 
-#scale them
-
-covS[,2:19] <- scale(covS[,2:19])
-
-
-# skygrowth BP
-fit <- skygrowth.map(DFTD ,  
-                     , res = 2*14  # Ne changes every 6 months over a 14 year period
-                     , tau0 = .1    # Smoothing parameter. If prior is not specified, this will also set the scale of the prior
-)
-plot(fit)
-growth.plot(fit)
-
-#fit with mcmc - I get a different result here than with skygrid map - not sure why yet
-mcmcfit <- skygrowth.mcmc(DFTD, res = 2*14, tau0=.1 ) #not sure how to tune this
-plot( mcmcfit )  #+ scale_y_log10(limits=c(.01, 1e5))
-growth.plot( mcmcfit )
-
-
-#compare to phylodynn
+#------------------------------------------------------------------------
+##################Look at NE through time for various linneages (Karcher et al)##################
+#------------------------------------------------------------------------  
 
 b0 <- BNPR(DFTD)
 plot_BNPR( b0 )
+
+
+########################################################
+#---Correlations with epidemiological features---------
+########################################################
+
+res <- cbind(rev(2018-b0$x),rev(b0$effpop)) #rev - reverse element of effective population size
+
+#gr=res[,2];gr=diff(gr)/gr[-length(gr)]#calculate the growth rate
+#res=cbind((res[-1,1]+res[-nrow(res),1])/2,gr)
+
+#interpolate effective population size for years with epi characteristics
+xs <- seq(2006,2017)
+DFTD_EffectivePopSize<- approx(res[,1],res[,2],xs,rule=2)$y #interpolating estimate for each year
+
+CovDataCombined <- cbind(covS, DFTD_EffectivePopSize)
+
+#correlation between devil population size and DFTD population size
+cor(CovDataCombined$Nestimate,CovDataCombined$DFTD_EffectivePopSize)
+cor.test(CovDataCombined$Nestimate,CovDataCombined$DFTD_EffectivePopSize)
+ccf(CovDataCombined$Nestimate,CovDataCombined$DFTD_EffectivePopSize)
+
+#calculate and plot correlations
+ReducedCovar <- cbind( devilPopSize=CovDataCombined$Nestimate, Prev=CovDataCombined$prevalenceMean, FOI=CovDataCombined$forceMean, DFTDEffPopSize=CovDataCombined$DFTD_EffectivePopSize)
+cormat <- round(cor(ReducedCovar),2)
+library(reshape2)
+melted_cormat <- melt(cormat)
+
+library(ggplot2)
+ggplot(data = melted_cormat, aes(x=Var1, y=Var2, fill=value)) + 
+  geom_tile()
+
+get_upper_tri <- function(cormat){
+  cormat[lower.tri(cormat)]<- NA
+  return(cormat)
+}
+upper_tri <- get_upper_tri(cormat)
+
+melted_cormat <- melt(upper_tri, na.rm = TRUE)
+# Final Heatmap
+
+ggplot(data = melted_cormat, aes(Var2, Var1, fill = value))+
+  geom_tile(color = "white")+
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white", 
+                       midpoint = 0, limit = c(-1,1), space = "Lab", 
+                       name="Pearson\nCorrelation") +
+  theme_minimal()+ 
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, 
+                                   size = 12, hjust = 1))+
+  coord_fixed()
+
+library(ggpubr)
+cor1 <- ggscatter(as.data.frame(ReducedCovar) , x = "devilPopSize", y = "DFTDEffPopSize",
+                  add = "reg.line",  # Add regression line
+                  add.params = list(color = "blue", fill = "lightgray"), # Customize reg. line
+                  conf.int = TRUE # Add confidence interval
+)
+# Add correlation coefficient
+cor1 + stat_cor(method = "pearson", label.x = 1, label.y = 2)
+
+cor2 <- ggscatter(as.data.frame(ReducedCovar) , x = "devilPopSize", y =  "FOI",
+                     add = "reg.line",  # Add regressin line
+                     add.params = list(color = "blue", fill = "lightgray"), # Customize reg. line
+                     conf.int = TRUE # Add confidence interval
+                     
+)
+# Add correlation coefficient
+cor2 + stat_cor(method = "pearson", label.x = 0.8, label.y = 2)
+
+
+########################################################
+#-------------------Skygrowth model---------------------
+########################################################
+
+
+globalgrowth <- skygrowth.mcmc(DFTD, res = 2*14, tau0=0.1,tau_logprior = function (x) dexp(x,0.1,T), mhsteps= 1e+06, control=list(thin=1e3) ) 
+
+#check convergence
+globalMCMC <- as.mcmc(cbind(globalgrowth$growthrate[,1:(ncol(globalgrowth$growthrate)-1)],globalgrowth$ne,globalgrowth$tau))
+effectiveSize(globalMCMC)
+
+#plots
+
+growth.plot(globalgrowth)+theme_bw()
+neplot(globalgrowth)+theme_bw()
+
 
 #last sampling time
 DLS <- 2017.3
@@ -99,10 +159,8 @@ DLS <- 2017.3
 set.seed(123)
 covS$date <- NULL
 str(covS)
-covFitNe <- skygrowth.mcmc.covar(DFTD,~Nestimate,cov2017,maxSampleTime=DLS, res=50, iter=40000000) #iter0=thinging (10 by default)
-summary(covFitFOI$beta)
-save(covFitNe, file="covFitNe.Rdata")
-load("covFitPrev.Rdata")
+
+
 growth.plot(covFitFOI)
 
 b <- as.mcmc(as.data.frame(covFitNe$beta))
@@ -113,13 +171,6 @@ ggB <- ggs(b)
 HPDinterval(b)
 ggs_density(ggB)
 ggs_traceplot(ggB)
-
-#males
-set.seed(123)
-covFitM <- skygrowth.mcmc.covar(bFIVnoFR,~m,cov,maxSampleTime=DLS,res=50,iter=4000000,iter0=20, tau0 =10, quiet=T) #res= number of time points
-# could alter tau log prior - number of time events
-a <- as.mcmc(as.data.frame(covFitM$beta))
-effectiveSize(a)#time series length N, square  root{var x)}/n
 
 #make a ggmcmc object
 ggA <- ggs(a)
